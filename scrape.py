@@ -1,13 +1,33 @@
+from dataclasses import dataclass
 import requests
 import time
 import os
 import zipfile
 import tempfile
+import pandas as pd
+import glob
 
 def batch(iterable, n=1):
     l = len(iterable)
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
+
+@dataclass
+class Archive:
+    base_url = 'https://api.ercot.com/api/public-reports/archive'
+    id: str;
+    folder: str;
+    batch_size = 500
+
+    @property
+    def url(self):
+        return self.base_url + '/' + self.id
+
+
+LDF = Archive('NP4-159-CD', 'ldf')
+DamShadow = Archive('NP4-191-CD', 'dam_shadow')
+DamHourlyLmps = Archive('NP4-183-CD', 'dam_hourly')
+WeatherZoneLoadForecast7D = Archive('NP3-565-CD', 'weatherzone_load_forecast')
 
 
 class ErcotApiClient:
@@ -28,7 +48,7 @@ class ErcotApiClient:
         }
         # Initialize session
         self.session = requests.Session()
-        self.session.hooks['response'] = [self._handle_401]
+        self.session.hooks['response'] = [self._handle_401, self._handle_429]
 
     def authenticate(self):
         auth_url = "https://ercotb2c.b2clogin.com/ercotb2c.onmicrosoft.com/B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/token"
@@ -80,11 +100,27 @@ class ErcotApiClient:
             request.headers['Authorization'] = f'Bearer {self.access_token}'
             return self.session.send(request)
         return response
+    
+    def _handle_429(self, response, *args, **kwargs):
+        """Handle 429 responses by refreshing the token and retrying the request."""
+        if response.status_code == 429:
+            retry_after = response.headers.get('Retry-After', 5)
+            if retry_after:
+                print(f"429 Rate limited. Waiting {retry_after} and trying again")
+            time.sleep(int(retry_after))
+            request = response.request
+            return self.session.send(request)
+        return response
 
     def index_request(self, url):
         all_matches = []
-        for i in range(1, 3):  # Two pages of requests
+        for i in range(1, 1000):  # Two pages of requests
             response = self.session.get(url, params=dict(**self.request_params, page=i))
+            # Probably because we're out of pages
+            if i % 10 == 0:
+                print(f'Requesting page {i}')
+            if response.status_code == 400:
+                break
             response.raise_for_status()
             data = response.json()
             archives = data.get('archives', [])
@@ -95,14 +131,14 @@ class ErcotApiClient:
             } for a in archives]
         return all_matches
 
-    def download_files(self, files, folder):
+    def download_files(self, files, archive):
         for i, file in enumerate(files):
             print(f'downloading {i + 1}/{len(files)}')
             time.sleep(2)
             response = self.session.get(file['link'])
             response.raise_for_status()
             filename = file['link'].split('?')[1].split('=')[1]
-            with open(f'{folder}/{filename}.csv', "w") as f:
+            with open(f'{archive.folder}/{filename}.csv', "w") as f:
                 f.write(response.text)
     
     def download_dam_shadow_files(self):
@@ -110,7 +146,7 @@ class ErcotApiClient:
         all_files = self.index_request(url)
         self.download_files(all_files, 'dam_shadow')
     
-    def download_dam_lmps_files(self):
+    def download_dam_lmps_files(self, archive):
         url = f'{self.base_url}/{self.dam_hourly_lmps}'
         all_files = self.index_request(url)
         self.download_files(all_files, 'dam_lmps')
@@ -120,30 +156,21 @@ class ErcotApiClient:
         all_files = self.index_request(url)
         self.download_files(all_files, 'ldf')
 
-    def ldf_download(self):
-        ldf_link = 'https://api.ercot.com/api/public-reports/archive/np4-159-cd?download=1023584516'
-        response = self.session.get(ldf_link)
-        response.raise_for_status()
-        return response.text
-
-    def batch_download(self, archive_type, batch_size=500):
-        INDEX_URL = 'https://api.ercot.com/api/public-reports/archive'
-        url = INDEX_URL + '/' + archive_type
+    def batch_download(self, archive):
+        url = archive.url
         all_files = self.index_request(url)
-        dest_dir = archive_type
+        dest_dir = archive.folder
 
         print(f'downloading {len(all_files)} files to {dest_dir}...')
 
-
         os.makedirs(dest_dir, exist_ok=True)
 
-        batches = batch(all_files, batch_size)
-        print(f'{len(batches)} of {batch_size} files')
+        batches = list(batch(all_files, archive.batch_size))
+        print(f'{len(batches)} batches of {archive.batch_size} files')
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for batch_no, file_batch in enumerate(batches):
-                print(f'downloading batch {batch_no} / {len(batches)}')
-                batch_no += 1
+                print(f'downloading batch {batch_no + 1} / {len(batches)}')
                 docIds = [str(doc['id']) for doc in file_batch]
                 data = {
                     'docIds': docIds,
@@ -165,7 +192,7 @@ class ErcotApiClient:
                     zf.extractall(dest_dir)
 
                 end_extract = time.time()
-                print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}')
+                print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}s')
 
         for zipped_csv in os.listdir(dest_dir):
             if not zipped_csv.endswith('.zip'):
@@ -176,8 +203,32 @@ class ErcotApiClient:
             os.remove(path)
 
 
-            
+def merge_csvs(dir):
+    # Use glob to find all CSV files in the directory and sort them
+    print('modified')
+    start = time.time()
+    csv_files = sorted(glob.glob(f'{dir}/*.csv'))
 
+    # Create an empty list to store dataframes
+    dfs = []
+
+    # Loop over all CSV files and read them into pandas dataframes
+    for file in csv_files:
+        df = pd.read_csv(file)
+        dfs.append(df)
+
+    t1 = time.time()
+    print(f"Read all csvs in {t1 - start}")
+    # Concatenate all dataframes into one dataframe
+    merged_df = pd.concat(dfs, ignore_index=True)
+    t2 = time.time()
+    print(f"Concatenated in in {t2 - t1}")
+
+    return merged_df
+
+    merged_df.to_csv(dir + '.csv')
+    t3 = time.time()
+    print(f"Wrote to disk in {t3 - t2}")
         
 
 # Example usage

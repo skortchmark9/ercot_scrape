@@ -205,7 +205,6 @@ class ErcotApiClient:
 
 def merge_csvs(dir):
     # Use glob to find all CSV files in the directory and sort them
-    print('modified')
     start = time.time()
     csv_files = sorted(glob.glob(f'{dir}/*.csv'))
 

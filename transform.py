@@ -33,34 +33,49 @@ def transform_ldf(raw_ercot_df):
     """
     pass
 
-def pivot_dam_lmp(raw_ercot_df):
-    """
-    DAM LMP:
-        Could you pivot the CSV file to have rows as datetime, columns as the bus, and cell values as the LMP? This would make the dataframe easier to read. And if yo could make it yearly CSVs so the file size can be manageable. (Attached is a sketch of the desired dataframe)
-        Same as LDF, merge DeliveryDate and HourEnding to have datetime column.
-        DSTFlag is for Daylight Saving Time repeated values.
-    """
-    pass
-
 
 # Set timezone to Central Prevailing Time (ERCOT), which is America/Chicago (CST/CDT)
 texas_tz = pytz.timezone('America/Chicago')
+
+def convert_interval_ending_to_datetimes(df):
+    """Assuming 5minute intervals"""
+    dt_combined = pd.to_datetime(df['INTERVAL_ENDING'], format='%m/%d/%Y %H:%M')
+    dt_combined = dt_combined - pd.Timedelta(5, 'min')
+    return dt_combined
+
+def convert_hour_date_to_datetimes(df):
+    keys_lower = [k.lower() for k in df.keys()]
+    hour_keys = [k for k in df.keys() if 'hour' in k.lower()]
+    date_keys = [k for k in df.keys() if 'date' in k.lower()]
+    if len(hour_keys) < 1:
+        raise Exception(f"Couldn't find hour keys in {df.keys()}")
+    if len(date_keys) < 1:
+        raise Exception(f"Couldn't find date keys in {df.keys()}")
+    hour_key = hour_keys[0]
+    date_key = date_keys[0]
+
+    # Adjust from HourEnding to HourBeginning so the parser won't choke
+    hour_adjusted = (df[hour_key].str.split(':').str[0].astype(int) - 1).astype(str) + ":00"
+    df['HourBeginning'] = hour_adjusted        
+    # Now convert to datetime
+    dt_combined = pd.to_datetime(df[date_key] + ' ' + df['HourBeginning'], format='%m/%d/%Y %H:%M')
+    del df['HourBeginning']
+    return dt_combined
 
 def convert_to_datetimes(df):
     """
     Convert DeliveryDate and HourEnding columns to a single UTC seconds column.
     Args:
-    - df (pd.DataFrame): Input dataframe with 'DeliveryDate', 'HourEnding', and 'DSTFlag'.
+    - df (pd.DataFrame): Input dataframe with 'DeliveryDate', hour_key, and 'DSTFlag'.
     
     Returns:
     - df (pd.DataFrame): Dataframe with a new 'utc_seconds' column.
     """
-    # Adjust from hourEnding to HourBeginning so the parser won't choke
-    hour_adjusted = (df['HourEnding'].str.split(':').str[0].astype(int) - 1).astype(str) + ":00"
-    df['HourBeginning'] = hour_adjusted
-
-    # Now convert to datetime
-    dt_combined = pd.to_datetime(df['DeliveryDate'] + ' ' + df['HourBeginning'], format='%m/%d/%Y %H:%M')
+    keys_lower = [k.lower() for k in df.keys()]
+    if 'interval_ending' in keys_lower:
+        dt_combined = convert_interval_ending_to_datetimes(df)
+    else:
+        dt_combined = convert_hour_date_to_datetimes(df)
 
     # Localize and convert to UTC without creating extra columns
     df['datetime_local'] = pd.Series(index=df.index, dtype='datetime64[ns, America/Chicago]')
@@ -92,6 +107,9 @@ def parse_date_from_csv_filename(fname):
 
     parsed_date = pd.to_datetime(combined_str, format='%Y%m%d%H%M%S')
     return parsed_date
+
+
+## WEATHER
 
 def process_one_weather_csv(path):
     df = pd.read_csv(path)
@@ -164,3 +182,70 @@ def process_all_weather_csvs(input_dir, output_dir='weather_by_zone'):
 
     t3 = time.time()
     print(f"Wrote to disk in {t3 - t2}")
+
+
+## DAM LMP
+
+def process_one_dam_lmp(path):
+    """
+    DAM LMP:
+        Could you pivot the CSV file to have rows as datetime, columns as the bus, and cell values as the LMP? This would make the dataframe easier to read. And if yo could make it yearly CSVs so the file size can be manageable. (Attached is a sketch of the desired dataframe)
+        Same as LDF, merge DeliveryDate and HourEnding to have datetime column.
+        DSTFlag is for Daylight Saving Time repeated values.
+    """
+    df = pd.read_csv(path)
+
+    with_local_times = convert_to_datetimes(df).reset_index(drop=True)
+
+    # Pivot so busses are columns
+    reshaped_df = with_local_times.pivot_table(index='datetime_local', columns=['BusName'], values='LMP')
+
+    # Reset index to make it a flat DataFrame
+    reshaped_df.reset_index(inplace=True)
+    return reshaped_df
+
+def process_all_dam_lmps(input_dir, output_dir='dam_lmps'):
+    t0 = time.time()
+    csv_files = sorted(glob.glob(f'{input_dir}/*.csv'))
+
+    # Loop over all CSV files and read them into pandas dataframes
+
+    dfs = []
+    for i, file in enumerate(csv_files):
+        if i % 10 == 0:
+            print(f'processing file {i}/{len(csv_files)}')
+        dfs.append(process_one_dam_lmp(file))
+
+    t1 = time.time()
+    print(f"Read all csvs in {t1 - t0}")
+
+    # Concatenate into one df per zone
+    merged = pd.concat(dfs, ignore_index=True)
+    t2 = time.time()
+    print(f"Concatenated in in {t2 - t1}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    split_by_year(output_dir + '/' + 'dam_lmp.csv', df=merged)
+    t3 = time.time()
+    print(f"Wrote to disk in {t3 - t2}")
+
+
+def split_by_year(path, df=None):
+    filename = path.split('/')[-1]
+
+    if df is None:
+        t0 = time.time()
+        df = pd.read_csv(filename)
+        t1 = time.time()
+        print(f"Read df in {t1-t0}s")
+
+    if 'datetime_local' not in df.keys():
+        df = convert_to_datetimes(df)
+
+    split_by_year = {year: group for year, group in df.groupby(df['datetime_local'].dt.year)}
+
+    # Verify the result
+    for year, subset in split_by_year.items():
+        new_filename = filename.replace('.csv', f'-{year}.csv')
+        subset.to_csv(path.replace(filename, new_filename), index=False)

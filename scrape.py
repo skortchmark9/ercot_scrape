@@ -6,6 +6,8 @@ import zipfile
 import tempfile
 import pandas as pd
 import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 def batch(iterable, n=1):
     l = len(iterable)
@@ -28,6 +30,9 @@ LDF = Archive('NP4-159-CD', 'ldf')
 DamShadow = Archive('NP4-191-CD', 'dam_shadow')
 DamHourlyLmps = Archive('NP4-183-CD', 'dam_hourly')
 WeatherZoneLoadForecast7D = Archive('NP3-565-CD', 'weatherzone_load_forecast')
+ActualWind = Archive('NP4-733-CD', 'wind')
+ActualSolar = Archive('NP4-738-CD', 'solar')
+
 
 
 class ErcotApiClient:
@@ -46,6 +51,12 @@ class ErcotApiClient:
             'postDatetimeTo': '2024-01-01T00:00',
             'size': 1000,  # Get all links in one page
         }
+        self.request_params = {
+            'postDatetimeFrom': '2022-01-01T00:00',
+            'postDatetimeTo': '2023-01-01T00:00',
+            'size': 2000,  # Get all links in one page
+        }
+
         # Initialize session
         self.session = requests.Session()
         self.session.hooks['response'] = [self._handle_401, self._handle_429]
@@ -106,8 +117,8 @@ class ErcotApiClient:
         if response.status_code == 429:
             retry_after = response.headers.get('Retry-After', 5)
             if retry_after:
-                print(f"429 Rate limited. Waiting {retry_after} and trying again")
-            time.sleep(int(retry_after))
+                print(f"429 Rate limited. Waiting {retry_after}s and trying again")
+            time.sleep(int(retry_after) + 1)
             request = response.request
             return self.session.send(request)
         return response
@@ -130,31 +141,6 @@ class ErcotApiClient:
                 'id': a['docId'],
             } for a in archives]
         return all_matches
-
-    def download_files(self, files, archive):
-        for i, file in enumerate(files):
-            print(f'downloading {i + 1}/{len(files)}')
-            time.sleep(2)
-            response = self.session.get(file['link'])
-            response.raise_for_status()
-            filename = file['link'].split('?')[1].split('=')[1]
-            with open(f'{archive.folder}/{filename}.csv', "w") as f:
-                f.write(response.text)
-    
-    def download_dam_shadow_files(self):
-        url = f'{self.base_url}/{self.dam_shadow_prices}'
-        all_files = self.index_request(url)
-        self.download_files(all_files, 'dam_shadow')
-    
-    def download_dam_lmps_files(self, archive):
-        url = f'{self.base_url}/{self.dam_hourly_lmps}'
-        all_files = self.index_request(url)
-        self.download_files(all_files, 'dam_lmps')
-    
-    def download_ldf_files(self):
-        url = f'{self.base_url}/{self.ldf}'
-        all_files = self.index_request(url)
-        self.download_files(all_files, 'ldf')
 
     def batch_download(self, archive):
         url = archive.url
@@ -201,6 +187,71 @@ class ErcotApiClient:
             with zipfile.ZipFile(path) as zf:
                 zf.extractall(dest_dir)
             os.remove(path)
+
+    def batch_download_parallel(self, archive):
+        url = archive.url
+        all_files = self.index_request(url)
+        dest_dir = archive.folder
+
+        print(f'downloading {len(all_files)} files to {dest_dir}...')
+
+        os.makedirs(dest_dir, exist_ok=True)
+
+        batches = list(batch(all_files, archive.batch_size))
+        processed = 0
+        print(f'{len(batches)} batches of {archive.batch_size} files')
+        overall_start = time.time()
+
+        def download_and_unzip_batch(batch_no, file_batch, tmpdir):
+            docIds = [str(doc['id']) for doc in file_batch]
+            data = {
+                'docIds': docIds,
+            }
+            start_dl = time.time()
+            response = self.session.post(url + '/download', 
+                                        json=data, 
+                                        stream=True)
+            response.raise_for_status()
+            path = f"{tmpdir}/batch_{batch_no}.zip"
+            with open(path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:  # filter out keep-alive new chunks
+                        f.write(chunk)
+
+            end_dl = time.time()
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(dest_dir)
+
+            end_extract = time.time()
+            print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}s')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(download_and_unzip_batch, batch_no, file_batch, tmpdir)
+                    for batch_no, file_batch in enumerate(batches)
+                ]
+                
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f'Error occurred: {e}')
+
+                    processed += 1
+                    print(f"{processed}/{len(batches)} done")
+
+        # Unzipping any additional files that were zipped in the destination directory
+        for zipped_csv in os.listdir(dest_dir):
+            if not zipped_csv.endswith('.zip'):
+                continue
+            path = dest_dir + "/" + zipped_csv
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(dest_dir)
+            os.remove(path)
+
+        done = time.time()
+        print(f"Downloaded {len(all_files)} in {done - overall_start}s.")
 
 
 def merge_csvs(dir):

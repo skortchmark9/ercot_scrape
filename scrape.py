@@ -6,6 +6,8 @@ import zipfile
 import tempfile
 import pandas as pd
 import glob
+import urllib
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -52,8 +54,8 @@ class ErcotApiClient:
             'size': 1000,  # Get all links in one page
         }
         self.request_params = {
-            'postDatetimeFrom': '2022-01-01T00:00',
-            'postDatetimeTo': '2023-01-01T00:00',
+            'postDatetimeFrom': '2019-01-01T00:00',
+            'postDatetimeTo': '2022-01-01T00:00',
             'size': 2000,  # Get all links in one page
         }
 
@@ -123,17 +125,40 @@ class ErcotApiClient:
             return self.session.send(request)
         return response
 
-    def index_request(self, url):
+    def get_from_cache(self, prepared_request):
+        path = 'request_cache'
+        cache_key = prepared_request.url
+        encoded = urllib.parse.quote_plus(cache_key)
+        response_data = None
+        if os.path.exists(path + '/' + encoded):
+            with open(path + '/' + encoded) as f:
+                response_data = json.loads(f.read())
+                return response_data
+
+    def write_to_cache(self, prepared_request, data):
+        path = 'request_cache'
+        os.makedirs(path, exist_ok=True)
+        cache_key = prepared_request.url
+        encoded = urllib.parse.quote_plus(cache_key)
+        with open(path + '/' + encoded, 'w+') as f:
+            f.write(json.dumps(data))
+
+    def index_request(self, archive):
         all_matches = []
-        for i in range(1, 1000):  # Two pages of requests
-            response = self.session.get(url, params=dict(**self.request_params, page=i))
-            # Probably because we're out of pages
-            if i % 10 == 0:
-                print(f'Requesting page {i}')
-            if response.status_code == 400:
-                break
-            response.raise_for_status()
-            data = response.json()
+        for i in range(1, 4):  # Two pages of requests
+            prepared_request = requests.Request('GET', archive.url, params=dict(**self.request_params, page=i)).prepare()
+            data = self.get_from_cache(prepared_request)
+            if not data:
+                response = self.session.get(archive.url, params=dict(**self.request_params, page=i))
+                if i % 10 == 0:
+                    print(f'Requesting page {i}')
+                # Probably because we're out of pages
+                if response.status_code == 400:
+                    break
+                response.raise_for_status()
+                data = response.json()
+                self.write_to_cache(prepared_request, data)
+
             archives = data.get('archives', [])
             all_matches += [{
                 'name': a['friendlyName'],
@@ -144,7 +169,7 @@ class ErcotApiClient:
 
     def batch_download(self, archive):
         url = archive.url
-        all_files = self.index_request(url)
+        all_files = self.index_request(archive)
         dest_dir = archive.folder
 
         print(f'downloading {len(all_files)} files to {dest_dir}...')
@@ -226,7 +251,7 @@ class ErcotApiClient:
             print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}s')
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor() as executor:
                 futures = [
                     executor.submit(download_and_unzip_batch, batch_no, file_batch, tmpdir)
                     for batch_no, file_batch in enumerate(batches)

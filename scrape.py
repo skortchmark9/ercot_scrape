@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import random
 import requests
 import time
 import os
@@ -33,7 +34,9 @@ DamShadow = Archive('NP4-191-CD', 'dam_shadow')
 DamHourlyLmps = Archive('NP4-183-CD', 'dam_hourly')
 WeatherZoneLoadForecast7D = Archive('NP3-565-CD', 'weatherzone_load_forecast')
 ActualWind = Archive('NP4-733-CD', 'wind')
+ActualWind.batch_size = 1000
 ActualSolar = Archive('NP4-738-CD', 'solar')
+ActualSolar.batch_size = 1000
 
 
 
@@ -48,15 +51,11 @@ class ErcotApiClient:
         self.dam_shadow_prices = 'NP4-191-CD'
         self.ldf = 'NP4-159-CD'
         self.dam_hourly_lmps = 'NP4-183-CD'
+        self.executor = None
         self.request_params = {
             'postDatetimeFrom': '2019-01-01T00:00',
             'postDatetimeTo': '2024-01-01T00:00',
             'size': 1000,  # Get all links in one page
-        }
-        self.request_params = {
-            'postDatetimeFrom': '2019-01-01T00:00',
-            'postDatetimeTo': '2022-01-01T00:00',
-            'size': 2000,  # Get all links in one page
         }
 
         # Initialize session
@@ -120,7 +119,7 @@ class ErcotApiClient:
             retry_after = response.headers.get('Retry-After', 5)
             if retry_after:
                 print(f"429 Rate limited. Waiting {retry_after}s and trying again")
-            time.sleep(int(retry_after) + 1)
+            time.sleep(int(retry_after) + random.randint(0, 20) * 0.1)
             request = response.request
             return self.session.send(request)
         return response
@@ -132,7 +131,14 @@ class ErcotApiClient:
         response_data = None
         if os.path.exists(path + '/' + encoded):
             with open(path + '/' + encoded) as f:
-                response_data = json.loads(f.read())
+                contents = f.read()
+                # Race condition where file was written without
+                # any data being written
+                if not contents:
+                    return None
+                
+                response_data = json.loads(contents)
+                
                 return response_data
 
     def write_to_cache(self, prepared_request, data):
@@ -145,7 +151,7 @@ class ErcotApiClient:
 
     def index_request(self, archive):
         all_matches = []
-        for i in range(1, 4):  # Two pages of requests
+        for i in range(1, 1000):  # Two pages of requests
             prepared_request = requests.Request('GET', archive.url, params=dict(**self.request_params, page=i)).prepare()
             data = self.get_from_cache(prepared_request)
             if not data:
@@ -215,7 +221,7 @@ class ErcotApiClient:
 
     def batch_download_parallel(self, archive):
         url = archive.url
-        all_files = self.index_request(url)
+        all_files = self.index_request(archive)
         dest_dir = archive.folder
 
         print(f'downloading {len(all_files)} files to {dest_dir}...')
@@ -251,7 +257,8 @@ class ErcotApiClient:
             print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}s')
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                self.executor = executor
                 futures = [
                     executor.submit(download_and_unzip_batch, batch_no, file_batch, tmpdir)
                     for batch_no, file_batch in enumerate(batches)
@@ -267,6 +274,8 @@ class ErcotApiClient:
                     print(f"{processed}/{len(batches)} done")
 
         # Unzipping any additional files that were zipped in the destination directory
+        beginning_unzipping = time.time()
+        print(f"Downloads complete in {beginning_unzipping - overall_start}s...unzipping downloaded files")
         for zipped_csv in os.listdir(dest_dir):
             if not zipped_csv.endswith('.zip'):
                 continue
@@ -276,6 +285,7 @@ class ErcotApiClient:
             os.remove(path)
 
         done = time.time()
+        print(f"Unzipped in {done - beginning_unzipping}s")
         print(f"Downloaded {len(all_files)} in {done - overall_start}s.")
 
 

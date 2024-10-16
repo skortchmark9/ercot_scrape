@@ -84,7 +84,7 @@ def convert_to_datetimes(df):
     non_dst_rows = df['DSTFlag'] == 'N'
     df.loc[non_dst_rows, 'datetime_local'] = (
         dt_combined[non_dst_rows]
-        .dt.tz_localize(texas_tz, ambiguous=False)
+        .dt.tz_localize(texas_tz, ambiguous=False, nonexistent='shift_forward')
     )
 
     # Handle DST rows (CDT)
@@ -227,6 +227,37 @@ def process_all_dam_lmps(input_dir, output_dir='dam_lmps'):
     os.makedirs(output_dir, exist_ok=True)
 
     split_by_year(output_dir + '/' + 'dam_lmp.csv', df=merged)
+    t3 = time.time()
+    print(f"Wrote to disk in {t3 - t2}")
+
+## Works for wind and solar since they are giving prices over last hour
+def process_all_historical(input_dir, output_dir='solar'):
+    t0 = time.time()
+    csv_files = sorted(glob.glob(f'{input_dir}/*.csv'))
+
+    # Loop over all CSV files and read them into pandas dataframes
+    dfs = []
+    for i, file in enumerate(csv_files):
+        if i % 10 == 0:
+            print(f'processing file {i}/{len(csv_files)}')
+
+        # Only add the last row from the file.
+        df = pd.read_csv(file)
+        df2 = df.tail(1)
+        with_local_times = convert_to_datetimes(df2).reset_index(drop=True)
+
+        dfs.append(with_local_times)
+
+    t1 = time.time()
+    print(f"Read all csvs in {t1 - t0}")
+
+    merged = pd.concat(dfs, ignore_index=True)
+    t2 = time.time()
+    print(f"Concatenated in in {t2 - t1}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    split_by_year(output_dir + '/' + output_dir + '.csv', df=merged)
     t3 = time.time()
     print(f"Wrote to disk in {t3 - t2}")
 

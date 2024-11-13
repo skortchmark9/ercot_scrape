@@ -62,6 +62,17 @@ class ErcotApiClient:
         self.session = requests.Session()
         self.session.hooks['response'] = [self._handle_401, self._handle_429]
 
+    @staticmethod
+    def from_env():
+        if not os.path.exists('.env.json'):
+            print("Must create a .env.json file containing API credentials.")
+            raise Exception("No .env.json file found")
+
+        with open('.env.json') as f:
+            env = json.load(f)
+        
+        return ErcotApiClient(env['ERCOT_API_USERNAME'], env['ERCOT_API_PASSWORD'], env['ERCOT_API_KEY'])
+
     def authenticate(self):
         auth_url = "https://ercotb2c.b2clogin.com/ercotb2c.onmicrosoft.com/B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/token"
         data = {
@@ -317,4 +328,4 @@ def merge_csvs(dir):
         
 
 # Example usage
-***REMOVED***
+# client = ErcotApiClient()

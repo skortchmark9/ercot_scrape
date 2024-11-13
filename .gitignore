@@ -1,0 +1,4 @@
+*.DS_STORE
+*.csv
+venv
+request_cache/*

@@ -5,16 +5,19 @@ import numpy as np
 # Load ERCOT dataset
 def load_ercot_data(filepath):
     """
-    Load and preprocess ERCOT dataset for optimization.
-    The dataset must contain:
-    - LMP (Locational Marginal Prices): A matrix with shape (N, H), where
-      N is the number of nodes and H is the number of time steps.
+    Read csv where rows are timestemps, columns are nodes, and values are LMPs
+
+    return a matrix of LMPs
     """
     ercot_data = pd.read_csv(filepath)
-    # Assuming the dataset has columns ['Node', 'Time', 'LMP']
-    # Pivot to create a matrix of LMPs
-    lmp_matrix = ercot_data.pivot(index='Node', columns='Time', values='LMP').values
-    return lmp_matrix
+
+    without_nans = ercot_data.dropna(axis='columns')
+    without_timestamps = without_nans.drop(columns='datetime_local')
+
+    # Drop all columns after 100th one to make things reasonably fast
+    without_timestamps.drop(columns=without_timestamps.columns[100:], inplace=True)
+
+    return without_timestamps
 
 # Parameters
 def setup_parameters(LMP, total_battery_budget=500, default_battery_capacity=100):
@@ -28,7 +31,7 @@ def setup_parameters(LMP, total_battery_budget=500, default_battery_capacity=100
     Returns:
     - Parameters dictionary.
     """
-    N, H = LMP.shape
+    H, N = LMP.shape
     return {
         'N': N,  # Number of nodes
         'H': H,  # Number of time periods
@@ -74,7 +77,7 @@ def optimize_battery_placement(params):
     # Objective: Maximize profit
     model.setObjective(
         quicksum(
-            z[n] * (LMP[n, t] * d[n, t] - LMP[n, t] * c[n, t])
+            z[n] * (LMP.iloc[t, n] * d[n, t] - LMP.iloc[t, n] * c[n, t])
             for n in range(N) for t in range(H)
         ),
         GRB.MAXIMIZE
@@ -129,10 +132,9 @@ def optimize_battery_placement(params):
     else:
         raise Exception("Optimization failed!")
 
-# Main execution
-if __name__ == "__main__":
+def main():
     # Load dataset
-    ercot_filepath = "ercot_dataset.csv"  # Replace with the actual file path
+    ercot_filepath = "data_dir/dam_lmps_by_year/dam_lmp-2019.csv"
     LMP = load_ercot_data(ercot_filepath)
 
     # Set up parameters
@@ -158,3 +160,6 @@ if __name__ == "__main__":
     print("\nState of Charge (MWh):")
     for node, schedule in results["soc_schedule"].items():
         print(f"Node {node}: {schedule}")
+
+if __name__ == "__main__":
+    main()

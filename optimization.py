@@ -1,6 +1,7 @@
 from gurobipy import Model, GRB, quicksum
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Load ERCOT dataset
 def load_ercot_data(filepath):
@@ -15,7 +16,7 @@ def load_ercot_data(filepath):
     without_timestamps = without_nans.drop(columns='datetime_local')
 
     # Drop all columns after 100th one to make things reasonably fast
-    without_timestamps.drop(columns=without_timestamps.columns[100:], inplace=True)
+    without_timestamps.drop(columns=without_timestamps.columns[1:], inplace=True)
 
     return without_timestamps
 
@@ -131,6 +132,52 @@ def optimize_battery_placement(params):
         }
     else:
         raise Exception("Optimization failed!")
+
+def display_node_results(params, node_idx, results):
+    """
+    Create a dataframe to display the results for a specific node.
+
+    Each parameter is hourly over the course of the year
+    """
+    df = pd.DataFrame({
+        'Charge (MW)': results['charge_schedule'][node_idx],
+        'Discharge (MW)': results['discharge_schedule'][node_idx],
+        'State of Charge (MWh)': results['soc_schedule'][node_idx],
+        'LMP ($/MWh)': params['LMP'].iloc[:, node_idx]
+    })
+
+    df['Net Charge (MW)'] = df['Discharge (MW)'] - df['Charge (MW)']
+    df['Period Profit'] = df['LMP ($/MWh)'] * df['Net Charge (MW)']
+    df['Cumulative Profit'] = df['Period Profit'].cumsum()
+
+    return df
+
+
+def plot_node_results(params, node_idx, results):
+    """
+    Create 3 strip charts where time is the x axis, and charge/discharge are a time series,
+    price is a time series on a different axis, and state of charge is a time series on a third axis.
+    """
+    df = display_node_results(params, node_idx, results)
+    fig, ax = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+
+    # Charge and discharge
+    ax[0].plot(df['Net Charge (MW)'], label='Net Charge (MW)', color='blue')
+    ax[0].set_ylabel('MW')
+    ax[0].legend()
+
+    # LMP
+    ax[1].plot(params['LMP'].iloc[:, node_idx], label='LMP ($/MWh)', color='green')
+    ax[1].set_ylabel('$/MWh')
+
+    # State of charge
+    ax[2].plot(results['soc_schedule'][node_idx], label='State of Charge (MWh)', color='purple')
+    ax[2].set_ylabel('MWh')
+
+    plt.xlabel('Hour')
+    plt.suptitle(f'Node {node_idx} Results')
+    plt.show()
+
 
 def main():
     # Load dataset

@@ -21,100 +21,58 @@ def load_lmps_data(filepath):
 
     return only_sps
 
-# Parameters
-def setup_parameters(LMP, total_battery_budget=500, default_battery_capacity=100):
-    """
-    Set up optimization parameters.
-    Args:
-    - LMP: Locational Marginal Prices matrix (N x H).
-    - total_battery_budget: Total battery capacity available for placement.
-    - default_battery_capacity: Default maximum battery capacity for each node.
-
-    Returns:
-    - Parameters dictionary.
-    """
-    without_timestamps = LMP.drop(columns='datetime_local')
-    H, N = without_timestamps.shape
-    return {
-        'N': N,  # Number of nodes
-        'H': H,  # Number of time periods
-        'max_battery_size': np.array([default_battery_capacity] * N),
-        'max_charge_rate': np.array([50] * N),
-        'efficiency': 0.95,  # Battery single-trip efficiency
-        'state_of_charge_initial': np.array([50] * N),
-        'total_battery_budget': total_battery_budget,
-        'LMP': without_timestamps,
-    }
 
 # Optimization model
-def optimize_battery_placement(params):
+def optimize_battery_placement(node_lmp):
     """
     Solve the optimization problem to maximize profit from battery operations.
-
-    Args:
-    - params: Dictionary of parameters.
 
     Returns:
     - Optimal profit and decision variables.
     """
-    # Extract parameters
-    N = params['N']
-    H = params['H']
-    max_battery_size = params['max_battery_size']
-    max_charge_rate = params['max_charge_rate']
-    efficiency = params['efficiency']
-    state_of_charge_initial = params['state_of_charge_initial']
-    LMP = params['LMP']
-    total_battery_budget = params['total_battery_budget']
+    H = len(node_lmp)
+    max_battery_size = 100
+    max_charge_rate = 50
+    efficiency = 0.95
+    state_of_charge_initial = 50
 
-    print(LMP.shape, N, H)
     # Initialize model
     model = Model("Battery_Profit_Optimization")
 
     # Decision variables
-    charge = model.addVars(N, H, lb=0, ub=max_charge_rate[0], name="Charge (MW)")
-    discharge = model.addVars(N, H, lb=0, ub=max_charge_rate[0], name="Discharge")  # Discharging (MW)
-    state_of_charge = model.addVars(N, H, lb=0, ub=max_battery_size[0], name="StateOfCharge")  # State of charge (MWh)
-    placed = model.addVars(N, vtype=GRB.BINARY, name="BatteryPlacement")  # Battery placement
-    max_battery_size_decision = model.addVars(N, lb=0, ub=max_battery_size[0], name="BatterySize")  # Battery size
+    charge = model.addVars(H, lb=0, ub=max_charge_rate, name="Charge (MW)")
+    discharge = model.addVars(H, lb=0, ub=max_charge_rate, name="Discharge (MW)")
+    state_of_charge = model.addVars(H, lb=0, ub=max_battery_size, name="StateOfCharge (MW)")
 
     # Objective: Maximize profit
     model.setObjective(
         quicksum(
-            placed[n] * (LMP.iloc[t, n] * discharge[n, t] * efficiency - LMP.iloc[t, n] * charge[n, t])
-            for n in range(N) for t in range(H)
+            node_lmp[t] * discharge[t] * efficiency - node_lmp[t] * charge[t]
+            for t in range(H)
         ),
         GRB.MAXIMIZE
     )
 
-
     # Constraints
     # State of charge dynamics
-    for n in range(N):
-        for t in range(H - 1):  # Exclude the last time step
-            model.addConstr(
-                state_of_charge[n, t + 1] == state_of_charge[n, t] + efficiency * charge[n, t] - discharge[n, t],
-                name=f"StateOfChargeDynamics_Node{n}_Time{t}"
-            )
+    for t in range(H - 1):  # Exclude the last time step
+        model.addConstr(
+            state_of_charge[t + 1] == state_of_charge[t] + efficiency * charge[t] - discharge[t],
+            name=f"StateOfChargeDynamics_Time{t}"
+        )
 
     # Initial state of charge
-    for n in range(N):
-        model.addConstr(state_of_charge[n, 0] == state_of_charge_initial[n], name=f"InitialState_Node{n}")
+    model.addConstr(state_of_charge[0] == state_of_charge_initial, name=f"InitialState_Node")
 
     # Capacity constraints
-    for n in range(N):
-        for t in range(H):
-            model.addConstr(state_of_charge[n, t] <= max_battery_size_decision[n] * placed[n], name=f"CapacityLimit_Node{n}_Time{t}")
+    for t in range(H):
+        model.addConstr(state_of_charge[t] <= max_battery_size, name=f"CapacityLimit_Time{t}")
 
     # Charge/discharge limits
-    for n in range(N):
-        for t in range(H):
-            model.addConstr(charge[n, t] <= max_charge_rate[n] * placed[n], name=f"ChargeLimit_Node{n}_Time{t}")
-            model.addConstr(discharge[n, t] <= max_charge_rate[n] * placed[n], name=f"DischargeLimit_Node{n}_Time{t}")
-
-    # Total battery size budget
-    model.addConstr(quicksum(max_battery_size_decision[n] * placed[n] for n in range(N)) <= total_battery_budget,
-                    name="BatterySizeBudget")
+    for t in range(H):
+        # @TODO: Should these account for efficiency?
+        model.addConstr(charge[t] <= max_charge_rate, name=f"ChargeLimit_Time{t}")
+        model.addConstr(discharge[t] <= max_charge_rate, name=f"DischargeLimit_Time{t}")
 
     # Optimize
     model.optimize()
@@ -122,22 +80,17 @@ def optimize_battery_placement(params):
     # Results
     if model.status == GRB.OPTIMAL:
         profit = model.objVal
-        placement = {n: placed[n].x for n in range(N)}
-        charge_schedule = {n: [charge[n, t].x for t in range(H)] for n in range(N)}
-        discharge_schedule = {n: [discharge[n, t].x for t in range(H)] for n in range(N)}
-        soc_schedule = {n: [state_of_charge[n, t].x for t in range(H)] for n in range(N)}
-        profit_timestep = {
-            n: [
-                (LMP.iloc[t, n] * discharge_schedule[n][t] * efficiency - LMP.iloc[t, n] * charge_schedule[n][t])
-                for t in range(H)]
-            for n in range(N)
-        }
-        (LMP.iloc[t, n] * discharge[n, t] * efficiency - LMP.iloc[t, n] * charge[n, t])
+        charge_schedule = [charge[t].x for t in range(H)]
+        discharge_schedule = [discharge[t].x for t in range(H)]
+        soc_schedule = [state_of_charge[t].x for t in range(H)]
+        profit_timestep = [
+            node_lmp[t] * discharge_schedule[t] * efficiency - node_lmp[t] * charge_schedule[t]
+            for t in range(H)
+        ]
         return {
-            "LMP": LMP,
+            "node_lmp": node_lmp,
             "total_profit": profit,
             'profit_timestep': profit_timestep,
-            "placement": placement,
             "charge_schedule": charge_schedule,
             "discharge_schedule": discharge_schedule,
             "soc_schedule": soc_schedule,
@@ -147,18 +100,18 @@ def optimize_battery_placement(params):
         model.write("infeasible.ilp")
         raise Exception("Optimization failed!")
 
-def display_node_results(node_idx, results):
+def display_node_results(results):
     """
     Create a dataframe to display the results for a specific node.
 
     Each parameter is hourly over the course of the year
     """
     df = pd.DataFrame({
-        'Charge (MW)': results['charge_schedule'][node_idx],
-        'Discharge (MW)': results['discharge_schedule'][node_idx],
-        'State of Charge (MWh)': results['soc_schedule'][node_idx],
-        'LMP ($/MWh)': results['LMP'].iloc[:, node_idx],
-        'Profit Timestep': results['profit_timestep'][node_idx],
+        'Charge (MW)': results['charge_schedule'],
+        'Discharge (MW)': results['discharge_schedule'],
+        'State of Charge (MWh)': results['soc_schedule'],
+        'LMP ($/MWh)': results['node_lmp'],
+        'Profit Timestep': results['profit_timestep'],
     })
 
     df['Cumulative Profit'] = df['Profit Timestep'].cumsum()

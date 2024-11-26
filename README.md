@@ -8,6 +8,7 @@ Tasks:
 - [X] get list of settlement points - from that get list of busses
 - [X] filter down list of busses to list of settlement points
 - [X] rearrange code so it works one node at a time / alternatively set up constraints so it picks top N locations
+- [ ] figure out how to properly apply efficiency metric to maximum charge/discharge rates.
 - [ ] run script across all 5 years of data (~15m /yr)
 - [ ] incorporate real-time data. LMPs are forecasts, so evaluate strategy against actual data and compare profits
 - [ ] plot results on map of texas: https://www.ercot.com/content/cdr/contours/rtmLmp.html

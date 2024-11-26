@@ -2,6 +2,8 @@ from gurobipy import Model, GRB, quicksum
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from collections import Counter
+import time
 
 from transform import load_settlement_points
 
@@ -15,14 +17,16 @@ def load_lmps_data(filepath):
 
     without_nans = ercot_data.dropna(axis='columns')
 
+    # Drop datetime column
+    without_nans.drop(columns=['datetime_local'], inplace=True)
+
     # Filter out any buses that are not settlement points
-    columns = [c for c in without_nans.columns[1:] if c not in sp_to_bus]
+    columns = [c for c in without_nans.columns if c not in sp_to_bus]
     only_sps = without_nans.drop(columns=columns)
 
     return only_sps
 
 
-# Optimization model
 def optimize_battery_placement(node_lmp):
     """
     Solve the optimization problem to maximize profit from battery operations.
@@ -38,6 +42,9 @@ def optimize_battery_placement(node_lmp):
 
     # Initialize model
     model = Model("Battery_Profit_Optimization")
+    # Reduce noise
+    model.setParam( 'OutputFlag', False )
+
 
     # Decision variables
     charge = model.addVars(H, lb=0, ub=max_charge_rate, name="Charge (MW)")
@@ -118,32 +125,23 @@ def display_node_results(results):
 
     return df
 
-
-def plot_node_results(params, node_idx, results):
+def find_best_battery_locations(lmps):
     """
-    Create 3 strip charts where time is the x axis, and charge/discharge are a time series,
-    price is a time series on a different axis, and state of charge is a time series on a third axis.
+    Find the optimal battery placement for each node in the ERCOT grid.
     """
-    df = display_node_results(params, node_idx, results)
-    fig, ax = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    all_results = {}
+    counter = Counter()
+    start = time.time()
+    for i, node in enumerate(lmps.columns[:100]):
+        if i % 10 == 0:
+            print(f"Optimizing for node {node} ({i + 1}/{len(lmps.columns) - 1})")
+            print(f"Time elapsed: {time.time() - start:.2f} seconds")
+        node_lmp = lmps[node]
+        all_results[node] = optimize_battery_placement(node_lmp)
+        counter[node] = all_results[node]['total_profit']
 
-    # Charge and discharge
-    ax[0].plot(df['Net Charge (MW)'], label='Net Charge (MW)', color='blue')
-    ax[0].set_ylabel('MW')
-    ax[0].legend()
-
-    # LMP
-    ax[1].plot(params['LMP'].iloc[:, node_idx], label='LMP ($/MWh)', color='green')
-    ax[1].set_ylabel('$/MWh')
-
-    # State of charge
-    ax[2].plot(results['soc_schedule'][node_idx], label='State of Charge (MWh)', color='purple')
-    ax[2].set_ylabel('MWh')
-
-    plt.xlabel('Hour')
-    plt.suptitle(f'Node {node_idx} Results')
-    plt.show()
-
+    print(counter.most_common(5))
+    return counter, all_results
 
 def main():
     # Load dataset

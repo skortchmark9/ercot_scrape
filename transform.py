@@ -3,6 +3,7 @@
 Our goal for each dataset is to have a datetime column that serves as the index.
 
 """
+from collections import defaultdict
 import time
 import os
 import pandas as pd
@@ -280,3 +281,25 @@ def split_by_year(path, df=None):
     for year, subset in split_by_year.items():
         new_filename = filename.replace('.csv', f'-{year}.csv')
         subset.to_csv(path.replace(filename, new_filename), index=False)
+
+
+
+###
+def load_settlement_points():
+    """Settlement Points (SPs) are the buses that have distinct prices
+    (ercot settle prices at these buses), while the other buse prices
+    are based on the nearest SP.
+    
+    This mapping allows us to find the list of nodes which are associated
+    with a given SP, and vice versa."""
+    path = 'static_data/Settlement_Points_11112024_174625.csv'
+    df = pd.read_csv(path)
+
+    bus_to_sp = {}
+    sp_to_bus = defaultdict(list)
+
+    for _, row in df.iterrows():
+        bus_to_sp[row['ELECTRICAL_BUS']] = row['PSSE_BUS_NAME']
+        sp_to_bus[row['PSSE_BUS_NAME']].append(row['ELECTRICAL_BUS'])
+
+    return bus_to_sp, sp_to_bus

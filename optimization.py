@@ -3,22 +3,23 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Load ERCOT dataset
-def load_ercot_data(filepath):
+from transform import load_settlement_points
+
+def load_lmps_data(filepath):
     """
     Read csv where rows are timestemps, columns are nodes, and values are LMPs
-
-    return a matrix of LMPs
     """
     ercot_data = pd.read_csv(filepath)
 
+    _, sp_to_bus = load_settlement_points()
+
     without_nans = ercot_data.dropna(axis='columns')
-    without_timestamps = without_nans.drop(columns='datetime_local')
 
-    # Drop all columns after 100th one to make things reasonably fast
-    without_timestamps.drop(columns=without_timestamps.columns[1:], inplace=True)
+    # Filter out any buses that are not settlement points
+    columns = [c for c in without_nans.columns[1:] if c not in sp_to_bus]
+    only_sps = without_nans.drop(columns=columns)
 
-    return without_timestamps
+    return only_sps
 
 # Parameters
 def setup_parameters(LMP, total_battery_budget=500, default_battery_capacity=100):
@@ -32,16 +33,17 @@ def setup_parameters(LMP, total_battery_budget=500, default_battery_capacity=100
     Returns:
     - Parameters dictionary.
     """
-    H, N = LMP.shape
+    without_timestamps = LMP.drop(columns='datetime_local')
+    H, N = without_timestamps.shape
     return {
         'N': N,  # Number of nodes
         'H': H,  # Number of time periods
-        'E_max': np.array([default_battery_capacity] * N),  # Max battery size per node
-        'P_max': np.array([50] * N),  # Max charge/discharge rate per node
-        'eta': 0.95,  # Battery round-trip efficiency
-        'S_initial': np.array([50] * N),  # Initial state of charge
-        'total_battery_budget': total_battery_budget,  # Total capacity budget
-        'LMP': LMP,  # Locational Marginal Prices
+        'max_battery_size': np.array([default_battery_capacity] * N),
+        'max_charge_rate': np.array([50] * N),
+        'efficiency': 0.95,  # Battery single-trip efficiency
+        'state_of_charge_initial': np.array([50] * N),
+        'total_battery_budget': total_battery_budget,
+        'LMP': without_timestamps,
     }
 
 # Optimization model
@@ -58,58 +60,60 @@ def optimize_battery_placement(params):
     # Extract parameters
     N = params['N']
     H = params['H']
-    E_max = params['E_max']
-    P_max = params['P_max']
-    eta = params['eta']
-    S_initial = params['S_initial']
+    max_battery_size = params['max_battery_size']
+    max_charge_rate = params['max_charge_rate']
+    efficiency = params['efficiency']
+    state_of_charge_initial = params['state_of_charge_initial']
     LMP = params['LMP']
     total_battery_budget = params['total_battery_budget']
 
+    print(LMP.shape, N, H)
     # Initialize model
     model = Model("Battery_Profit_Optimization")
 
     # Decision variables
-    c = model.addVars(N, H, lb=0, ub=P_max[0], name="Charge")  # Charging (MW)
-    d = model.addVars(N, H, lb=0, ub=P_max[0], name="Discharge")  # Discharging (MW)
-    s = model.addVars(N, H, lb=0, ub=E_max[0], name="StateOfCharge")  # State of charge (MWh)
-    z = model.addVars(N, vtype=GRB.BINARY, name="BatteryPlacement")  # Battery placement
-    E_max_decision = model.addVars(N, lb=0, ub=E_max[0], name="BatterySize")  # Battery size
+    charge = model.addVars(N, H, lb=0, ub=max_charge_rate[0], name="Charge (MW)")
+    discharge = model.addVars(N, H, lb=0, ub=max_charge_rate[0], name="Discharge")  # Discharging (MW)
+    state_of_charge = model.addVars(N, H, lb=0, ub=max_battery_size[0], name="StateOfCharge")  # State of charge (MWh)
+    placed = model.addVars(N, vtype=GRB.BINARY, name="BatteryPlacement")  # Battery placement
+    max_battery_size_decision = model.addVars(N, lb=0, ub=max_battery_size[0], name="BatterySize")  # Battery size
 
     # Objective: Maximize profit
     model.setObjective(
         quicksum(
-            z[n] * (LMP.iloc[t, n] * d[n, t] - LMP.iloc[t, n] * c[n, t])
+            placed[n] * (LMP.iloc[t, n] * discharge[n, t] * efficiency - LMP.iloc[t, n] * charge[n, t])
             for n in range(N) for t in range(H)
         ),
         GRB.MAXIMIZE
     )
+
 
     # Constraints
     # State of charge dynamics
     for n in range(N):
         for t in range(H - 1):  # Exclude the last time step
             model.addConstr(
-                s[n, t + 1] == s[n, t] + eta * c[n, t] - d[n, t] / eta,
+                state_of_charge[n, t + 1] == state_of_charge[n, t] + efficiency * charge[n, t] - discharge[n, t],
                 name=f"StateOfChargeDynamics_Node{n}_Time{t}"
             )
 
     # Initial state of charge
     for n in range(N):
-        model.addConstr(s[n, 0] == S_initial[n], name=f"InitialState_Node{n}")
+        model.addConstr(state_of_charge[n, 0] == state_of_charge_initial[n], name=f"InitialState_Node{n}")
 
     # Capacity constraints
     for n in range(N):
         for t in range(H):
-            model.addConstr(s[n, t] <= E_max_decision[n] * z[n], name=f"CapacityLimit_Node{n}_Time{t}")
+            model.addConstr(state_of_charge[n, t] <= max_battery_size_decision[n] * placed[n], name=f"CapacityLimit_Node{n}_Time{t}")
 
     # Charge/discharge limits
     for n in range(N):
         for t in range(H):
-            model.addConstr(c[n, t] <= P_max[n] * z[n], name=f"ChargeLimit_Node{n}_Time{t}")
-            model.addConstr(d[n, t] <= P_max[n] * z[n], name=f"DischargeLimit_Node{n}_Time{t}")
+            model.addConstr(charge[n, t] <= max_charge_rate[n] * placed[n], name=f"ChargeLimit_Node{n}_Time{t}")
+            model.addConstr(discharge[n, t] <= max_charge_rate[n] * placed[n], name=f"DischargeLimit_Node{n}_Time{t}")
 
     # Total battery size budget
-    model.addConstr(quicksum(E_max_decision[n] * z[n] for n in range(N)) <= total_battery_budget,
+    model.addConstr(quicksum(max_battery_size_decision[n] * placed[n] for n in range(N)) <= total_battery_budget,
                     name="BatterySizeBudget")
 
     # Optimize
@@ -118,22 +122,32 @@ def optimize_battery_placement(params):
     # Results
     if model.status == GRB.OPTIMAL:
         profit = model.objVal
-        placement = {n: z[n].x for n in range(N)}
-        charge_schedule = {n: [c[n, t].x for t in range(H)] for n in range(N)}
-        discharge_schedule = {n: [d[n, t].x for t in range(H)] for n in range(N)}
-        soc_schedule = {n: [s[n, t].x for t in range(H)] for n in range(N)}
-
+        placement = {n: placed[n].x for n in range(N)}
+        charge_schedule = {n: [charge[n, t].x for t in range(H)] for n in range(N)}
+        discharge_schedule = {n: [discharge[n, t].x for t in range(H)] for n in range(N)}
+        soc_schedule = {n: [state_of_charge[n, t].x for t in range(H)] for n in range(N)}
+        profit_timestep = {
+            n: [
+                (LMP.iloc[t, n] * discharge_schedule[n][t] * efficiency - LMP.iloc[t, n] * charge_schedule[n][t])
+                for t in range(H)]
+            for n in range(N)
+        }
+        (LMP.iloc[t, n] * discharge[n, t] * efficiency - LMP.iloc[t, n] * charge[n, t])
         return {
-            "profit": profit,
+            "LMP": LMP,
+            "total_profit": profit,
+            'profit_timestep': profit_timestep,
             "placement": placement,
             "charge_schedule": charge_schedule,
             "discharge_schedule": discharge_schedule,
             "soc_schedule": soc_schedule,
         }
     else:
+        model.computeIIS()
+        model.write("infeasible.ilp")
         raise Exception("Optimization failed!")
 
-def display_node_results(params, node_idx, results):
+def display_node_results(node_idx, results):
     """
     Create a dataframe to display the results for a specific node.
 
@@ -143,12 +157,11 @@ def display_node_results(params, node_idx, results):
         'Charge (MW)': results['charge_schedule'][node_idx],
         'Discharge (MW)': results['discharge_schedule'][node_idx],
         'State of Charge (MWh)': results['soc_schedule'][node_idx],
-        'LMP ($/MWh)': params['LMP'].iloc[:, node_idx]
+        'LMP ($/MWh)': results['LMP'].iloc[:, node_idx],
+        'Profit Timestep': results['profit_timestep'][node_idx],
     })
 
-    df['Net Charge (MW)'] = df['Discharge (MW)'] - df['Charge (MW)']
-    df['Period Profit'] = df['LMP ($/MWh)'] * df['Net Charge (MW)']
-    df['Cumulative Profit'] = df['Period Profit'].cumsum()
+    df['Cumulative Profit'] = df['Profit Timestep'].cumsum()
 
     return df
 
@@ -182,7 +195,7 @@ def plot_node_results(params, node_idx, results):
 def main():
     # Load dataset
     ercot_filepath = "data_dir/dam_lmps_by_year/dam_lmp-2019.csv"
-    LMP = load_ercot_data(ercot_filepath)
+    LMP = load_lmps_data(ercot_filepath)
 
     # Set up parameters
     params = setup_parameters(LMP)

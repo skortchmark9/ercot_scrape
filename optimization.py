@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
 import time
+import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from transform import load_settlement_points
 
@@ -27,7 +29,7 @@ def load_lmp_data(filepath):
     return only_sps
 
 
-def optimize_battery_placement(node_lmp):
+def optimize_battery_placement(node_name, node_lmp):
     """
     Solve the optimization problem to maximize profit from battery operations.
 
@@ -95,6 +97,7 @@ def optimize_battery_placement(node_lmp):
             for t in range(H)
         ]
         return {
+            "node_name": node_name,
             "node_lmp": node_lmp,
             "total_profit": profit,
             'profit_timestep': profit_timestep,
@@ -126,6 +129,73 @@ def display_node_results(results):
 
     return df
 
+def plot_multi_node_results(all_results, nodes):
+    """
+    Display two plots with a shared time (x) axis. The first should have
+    the first should have the LMP prices, and the last should
+    have the cumulative profit. Each trace on the plots represents a single
+    node.
+    """
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    for node in nodes:
+        df = display_node_results(all_results[node])
+
+        # Plot LMP prices
+        axs[0].plot(df.index, df['LMP ($/MWh)'], label=f'{node} LMP')
+        
+        # Plot cumulative profit
+        axs[1].plot(df.index, df['Cumulative Profit'], label=f'{node} Cumulative Profit')
+
+    axs[0].set_ylabel('LMP ($/MWh)')
+    axs[0].legend(loc='upper left')
+    axs[0].grid(True)
+
+    axs[1].set_ylabel('Cumulative Profit ($)')
+    axs[1].set_xlabel('Time (hours)')
+    axs[1].legend(loc='upper left')
+    axs[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_single_node_results(results):
+    """
+    Display three plots with a shared time (x) axis. The first should have
+    state of charge, the second should have the LMP prices, and the last should
+    have the cumulative profit.
+    """
+    df = display_node_results(results)
+
+    fig, axs = plt.subplots(3, 1, figsize=(6, 8), sharex=True)
+
+    # Plot state of charge
+    axs[0].plot(df.index, df['Discharge (MW)'], label='Discharge (MW)')
+    axs[0].set_ylabel('Discharge (MWh)')
+    axs[0].legend(loc='upper left')
+    axs[0].grid(True)
+
+    # Plot LMP prices
+    axs[1].plot(df.index, df['LMP ($/MWh)'], label='LMP ($/MWh)', color='orange')
+    axs[1].set_ylabel('LMP ($/MWh)')
+    axs[1].legend(loc='upper left')
+    axs[1].grid(True)
+
+    # Plot cumulative profit
+    axs[2].plot(df.index, df['Cumulative Profit'], label='Cumulative Profit', color='green')
+    axs[2].set_ylabel('Cumulative Profit ($)')
+    axs[2].set_xlabel('Time (hours)')
+    axs[2].legend(loc='upper left')
+    axs[2].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+    
+
+
+
 def find_best_battery_locations(lmps):
     """
     Find the optimal battery placement for each node in the ERCOT grid.
@@ -133,16 +203,42 @@ def find_best_battery_locations(lmps):
     all_results = {}
     counter = Counter()
     start = time.time()
-    for i, node in enumerate(lmps.columns[:100]):
-        if i % 10 == 0:
-            print(f"Optimizing for node {node} ({i + 1}/{len(lmps.columns) - 1})")
-            print(f"Time elapsed: {time.time() - start:.2f} seconds")
-        node_lmp = lmps[node]
-        all_results[node] = optimize_battery_placement(node_lmp)
-        counter[node] = all_results[node]['total_profit']
+
+    processed = 0
+    # In parallel, iterate over each node and optimize, saving results.
+    with ProcessPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(optimize_battery_placement, node, node_lmp)
+            for node, node_lmp in lmps.items()
+        ]
+        
+        for future in as_completed(futures):
+            try:
+                results = future.result()
+                node = results['node_name']
+                all_results[node] = results
+                counter[node] = results['total_profit']
+            except Exception as e:
+                print(f'Error occurred: {e}')
+
+            processed += 1
+            if processed % 10 == 0:
+                print(f"Got results for ({processed}/{len(lmps.columns) - 1})")
+                print(f"Time elapsed: {time.time() - start:.2f} seconds")
+
 
     print(counter.most_common(5))
     return counter, all_results
+
+
+def save_results(all_results, name):
+    """
+    Save the results to pickle dump.
+    """
+    dir = 'results'
+    with open('results/' + name, 'wb') as f:
+        pickle.dump(all_results, f)
+
 
 def main():
     # Load dataset
@@ -152,7 +248,7 @@ def main():
     node = 'AMI_AMISTAG1'
 
     # Optimize
-    results = optimize_battery_placement(lmp[node])
+    results = optimize_battery_placement(node, lmp[node])
 
     # Display results
     print(f"Optimal Profit for Node {node}: ${results['total_profit']:.2f}")

@@ -79,9 +79,9 @@ def optimize_battery_placement(node_name, node_lmp):
 
     # Charge/discharge limits
     for t in range(H):
-        # @TODO: Should these account for efficiency?
-        model.addConstr(charge[t] <= max_charge_rate, name=f"ChargeLimit_Time{t}")
-        model.addConstr(discharge[t] <= max_charge_rate, name=f"DischargeLimit_Time{t}")
+        # @TODO: Should these account for efficiency? ( added in efficiency factor, for charge / discharge )
+        model.addConstr(charge[t] <= max_charge_rate / efficiency, name=f"ChargeLimit_Time{t}")
+        model.addConstr(discharge[t] <= max_charge_rate * efficiency, name=f"DischargeLimit_Time{t}")
 
     # Optimize
     model.optimize()

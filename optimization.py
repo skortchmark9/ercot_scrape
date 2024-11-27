@@ -142,11 +142,14 @@ def plot_multi_node_results(all_results, nodes):
     for node in nodes:
         df = display_node_results(all_results[node])
 
-        # Plot LMP prices
-        axs[0].plot(df.index, df['LMP ($/MWh)'], label=f'{node} LMP')
+        # Convert year hours to datetime
+        x_times = pd.date_range(start='1/1/2023', periods=len(df), freq='h')
+
+        # Plot LMP prices. Convert hours to datetime        
+        axs[0].plot(x_times, df['LMP ($/MWh)'], label=f'{node} LMP')
         
         # Plot cumulative profit
-        axs[1].plot(df.index, df['Cumulative Profit'], label=f'{node} Cumulative Profit')
+        axs[1].plot(x_times, df['Cumulative Profit'], label=f'{node} Cumulative Profit')
 
     axs[0].set_ylabel('LMP ($/MWh)')
     axs[0].legend(loc='upper left')
@@ -194,7 +197,16 @@ def plot_single_node_results(results):
     plt.show()
     
 
+def top_across_all_yrs(all_data):
+    """
+    Find the top 5 most profitable nodes across all years.
+    """
+    counter = Counter()
+    for yr_data in all_data:
+        for node, results in yr_data.items():
+            counter[node] += results['total_profit']
 
+    return counter
 
 def find_best_battery_locations(lmps):
     """
@@ -226,8 +238,6 @@ def find_best_battery_locations(lmps):
                 print(f"Got results for ({processed}/{len(lmps.columns) - 1})")
                 print(f"Time elapsed: {time.time() - start:.2f} seconds")
 
-
-    print(counter.most_common(5))
     return counter, all_results
 
 
@@ -236,9 +246,35 @@ def save_results(all_results, name):
     Save the results to pickle dump.
     """
     dir = 'results'
-    with open('results/' + name, 'wb') as f:
+    with open('results/' + name + '.pkl', 'wb') as f:
         pickle.dump(all_results, f)
 
+def load_results(name):
+    """
+    Load the results from pickle dump.
+    """
+    with open(f'results/{name}.pkl', 'rb') as f:
+        return pickle.load(f)
+
+def optimize_across_years():
+    # years = (2019, 2020, 2021, 2022, 2023)
+    years = (2022, 2023)
+    for year in years:
+        t0 = time.time()
+        lmp_file = f"data_dir/dam_lmps_by_year/dam_lmp-{year}.csv"
+        lmps = load_lmp_data(lmp_file)
+        t1 = time.time()
+        print(f"Loaded {year} data in: {t1 - t0:.2f} seconds")
+
+        c, a = find_best_battery_locations(lmps)
+        print(f"5 most profitable locations in {year}")
+        print(c.most_common(5))
+        t2 = time.time()
+        print(f"Optimized across {year} data in: {t2 - t1:.2f} seconds")
+
+        save_results(a, str(year))
+        t3 = time.time()
+        print(f"Saved results for {year} in: {t3 - t2:.2f} seconds")
 
 def main():
     # Load dataset

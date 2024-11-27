@@ -7,7 +7,7 @@ import time
 
 from transform import load_settlement_points
 
-def load_lmps_data(filepath):
+def load_lmp_data(filepath):
     """
     Read csv where rows are timestemps, columns are nodes, and values are LMPs
     """
@@ -122,6 +122,7 @@ def display_node_results(results):
     })
 
     df['Cumulative Profit'] = df['Profit Timestep'].cumsum()
+    print(df)
 
     return df
 
@@ -146,31 +147,17 @@ def find_best_battery_locations(lmps):
 def main():
     # Load dataset
     ercot_filepath = "data_dir/dam_lmps_by_year/dam_lmp-2019.csv"
-    LMP = load_lmps_data(ercot_filepath)
+    lmp = load_lmp_data(ercot_filepath)
 
-    # Set up parameters
-    params = setup_parameters(LMP)
+    node = 'AMI_AMISTAG1'
 
     # Optimize
-    results = optimize_battery_placement(params)
+    results = optimize_battery_placement(lmp[node])
 
     # Display results
-    print(f"Optimal Profit: ${results['profit']:.2f}")
-    print("\nBattery Placement:")
-    for node, placed in results["placement"].items():
-        print(f"Node {node}: {'Yes' if placed > 0.5 else 'No'}")
+    print(f"Optimal Profit for Node {node}: ${results['total_profit']:.2f}")
+    display_node_results(results)
 
-    print("\nCharge Schedule (MW):")
-    for node, schedule in results["charge_schedule"].items():
-        print(f"Node {node}: {schedule}")
-
-    print("\nDischarge Schedule (MW):")
-    for node, schedule in results["discharge_schedule"].items():
-        print(f"Node {node}: {schedule}")
-
-    print("\nState of Charge (MWh):")
-    for node, schedule in results["soc_schedule"].items():
-        print(f"Node {node}: {schedule}")
 
 if __name__ == "__main__":
     main()

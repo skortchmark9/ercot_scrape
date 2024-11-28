@@ -284,7 +284,6 @@ def split_by_year(path, df=None):
 
 
 
-###
 def load_settlement_points():
     """Settlement Points (SPs) are the buses that have distinct prices
     (ercot settle prices at these buses), while the other buse prices
@@ -303,3 +302,52 @@ def load_settlement_points():
         sp_to_bus[row['PSSE_BUS_NAME']].append(row['ELECTRICAL_BUS'])
 
     return bus_to_sp, sp_to_bus
+
+### Realtime LMPs
+
+def process_one_realtime_lmp():
+    path = 'realtime_lmps/cdr.00012300.0000000000000000.20190101.000024.LMPSROSNODENP6788_20190101_000020.csv'
+    df = pd.read_csv(path)
+    pivoted = df.pivot_table(index='SCEDTimestamp', columns='SettlementPoint', values='LMP')
+
+    pivoted['datetime_local'] = pivoted.index.map(lambda x: pd.to_datetime(x, format='%m/%d/%Y %H:%M:%S'))
+
+    # Reorder columns to put datetime_local at the front
+    cols = pivoted.columns.tolist()
+    cols = cols[-1:] + cols[:-1]
+    pivoted = pivoted[cols]
+    # pivoted = pivoted.reset_index(drop=True)
+    return pivoted
+
+
+
+## Works for wind and solar since they are giving prices over last hour
+def process_all_historical(input_dir, output_dir='solar'):
+    t0 = time.time()
+    csv_files = sorted(glob.glob(f'{input_dir}/*.csv'))
+
+    # Loop over all CSV files and read them into pandas dataframes
+    dfs = []
+    for i, file in enumerate(csv_files):
+        if i % 10 == 0:
+            print(f'processing file {i}/{len(csv_files)}')
+
+        # Only add the last row from the file.
+        df = pd.read_csv(file)
+        df2 = df.tail(1)
+        with_local_times = convert_to_datetimes(df2).reset_index(drop=True)
+
+        dfs.append(with_local_times)
+
+    t1 = time.time()
+    print(f"Read all csvs in {t1 - t0}")
+
+    merged = pd.concat(dfs, ignore_index=True)
+    t2 = time.time()
+    print(f"Concatenated in in {t2 - t1}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    split_by_year(output_dir + '/' + output_dir + '.csv', df=merged)
+    t3 = time.time()
+    print(f"Wrote to disk in {t3 - t2}")

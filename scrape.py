@@ -30,9 +30,16 @@ class Archive:
 
 
 LDF = Archive('NP4-159-CD', 'ldf')
+
 DamShadow = Archive('NP4-191-CD', 'dam_shadow')
+
 DamHourlyLmps = Archive('NP4-183-CD', 'dam_hourly')
+
 WeatherZoneLoadForecast7D = Archive('NP3-565-CD', 'weatherzone_load_forecast')
+
+RealtimeLMPs = Archive('np6-788-cd', 'realtime_lmps')
+"""Actual LMPs for settlemnt nodes as a result of SCED. Published at 5m intervals"""
+
 ActualWind = Archive('NP4-733-CD', 'wind')
 ActualWind.batch_size = 1000
 ActualSolar = Archive('NP4-738-CD', 'solar')
@@ -48,9 +55,6 @@ class ErcotApiClient:
         self.access_token = None
         self.refresh_token = None
         self.base_url = 'https://api.ercot.com/api/public-reports/archive'
-        self.dam_shadow_prices = 'NP4-191-CD'
-        self.ldf = 'NP4-159-CD'
-        self.dam_hourly_lmps = 'NP4-183-CD'
         self.executor = None
         self.request_params = {
             'postDatetimeFrom': '2019-01-01T00:00',

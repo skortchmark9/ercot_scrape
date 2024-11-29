@@ -5,3 +5,4 @@ request_cache/*
 data_dir
 .env.json
 __pycache__
+results

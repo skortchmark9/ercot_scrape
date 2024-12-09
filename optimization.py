@@ -125,8 +125,6 @@ def display_node_results(results):
     })
 
     df['Cumulative Profit'] = df['Profit Timestep'].cumsum()
-    print(df)
-
     return df
 
 def plot_multi_node_results(all_results, nodes):

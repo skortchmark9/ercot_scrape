@@ -1,3 +1,15 @@
+"""
+Scraper to interact with the ERCOT API and download data files.
+
+Example Usage:
+    # Create a .env.json file containing the API credentials from ERCOT.
+
+    client = ErcotApiClient.from_env()
+    client.authenticate()
+    client.batch_download_parallel(ActualWind)
+
+    # Wind files will appear in the data_dir/wind directory.
+"""
 from dataclasses import dataclass
 import random
 import requests
@@ -5,11 +17,11 @@ import time
 import os
 import zipfile
 import tempfile
-import pandas as pd
-import glob
 import urllib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+DATA_DIR = 'data_dir/'
 
 
 def batch(iterable, n=1):
@@ -31,18 +43,18 @@ class Archive:
 
 LDF = Archive('NP4-159-CD', 'ldf')
 
-DamShadow = Archive('NP4-191-CD', 'dam_shadow')
+DamShadow = Archive('NP4-191-CD', DATA_DIR + 'dam_shadow')
 
-DamHourlyLmps = Archive('NP4-183-CD', 'dam_hourly')
+DamHourlyLmps = Archive('NP4-183-CD', DATA_DIR + 'dam_hourly')
 
-WeatherZoneLoadForecast7D = Archive('NP3-565-CD', 'weatherzone_load_forecast')
+WeatherZoneLoadForecast7D = Archive('NP3-565-CD', DATA_DIR + 'weatherzone_load_forecast')
 
-RealtimeLMPs = Archive('np6-788-cd', 'realtime_lmps')
-"""Actual LMPs for settlemnt nodes as a result of SCED. Published at 5m intervals"""
+RealtimeLMPs = Archive('np6-788-cd', DATA_DIR + 'realtime_lmps')
+"""Actual LMPs for settlement nodes as a result of SCED. Published at 5m intervals"""
 
-ActualWind = Archive('NP4-733-CD', 'wind')
+ActualWind = Archive('NP4-733-CD', DATA_DIR + 'wind')
 ActualWind.batch_size = 1000
-ActualSolar = Archive('NP4-738-CD', 'solar')
+ActualSolar = Archive('NP4-738-CD', DATA_DIR + 'solar')
 ActualSolar.batch_size = 1000
 
 
@@ -139,7 +151,7 @@ class ErcotApiClient:
             return self.session.send(request)
         return response
 
-    def get_from_cache(self, prepared_request):
+    def _get_request_from_cache(self, prepared_request):
         path = 'request_cache'
         cache_key = prepared_request.url
         encoded = urllib.parse.quote_plus(cache_key)
@@ -156,7 +168,7 @@ class ErcotApiClient:
                 
                 return response_data
 
-    def write_to_cache(self, prepared_request, data):
+    def _write_request_to_cache(self, prepared_request, data):
         path = 'request_cache'
         os.makedirs(path, exist_ok=True)
         cache_key = prepared_request.url
@@ -165,10 +177,12 @@ class ErcotApiClient:
             f.write(json.dumps(data))
 
     def index_request(self, archive):
+        """Get all the links to the files in the archive, which we can then use
+        to request the files."""
         all_matches = []
-        for i in range(1, 1000):  # Two pages of requests
+        for i in range(1, 1000):
             prepared_request = requests.Request('GET', archive.url, params=dict(**self.request_params, page=i)).prepare()
-            data = self.get_from_cache(prepared_request)
+            data = self._get_request_from_cache(prepared_request)
             if not data:
                 response = self.session.get(archive.url, params=dict(**self.request_params, page=i))
                 if i % 10 == 0:
@@ -178,7 +192,7 @@ class ErcotApiClient:
                     break
                 response.raise_for_status()
                 data = response.json()
-                self.write_to_cache(prepared_request, data)
+                self._write_request_to_cache(prepared_request, data)
 
             archives = data.get('archives', [])
             all_matches += [{
@@ -188,53 +202,10 @@ class ErcotApiClient:
             } for a in archives]
         return all_matches
 
-    def batch_download(self, archive):
-        url = archive.url
-        all_files = self.index_request(archive)
-        dest_dir = archive.folder
-
-        print(f'downloading {len(all_files)} files to {dest_dir}...')
-
-        os.makedirs(dest_dir, exist_ok=True)
-
-        batches = list(batch(all_files, archive.batch_size))
-        print(f'{len(batches)} batches of {archive.batch_size} files')
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for batch_no, file_batch in enumerate(batches):
-                print(f'downloading batch {batch_no + 1} / {len(batches)}')
-                docIds = [str(doc['id']) for doc in file_batch]
-                data = {
-                    'docIds': docIds,
-                }
-                start_dl = time.time()
-                response = self.session.post(url + '/download', 
-                    json=data,
-                    stream=True
-                )
-                response.raise_for_status()
-                path = f"{tmpdir}/batch_{batch_no}.zip"
-                with open(path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=1024):
-                        if chunk:  # filter out keep-alive new chunks
-                            f.write(chunk)
-
-                end_dl = time.time()
-                with zipfile.ZipFile(path) as zf:
-                    zf.extractall(dest_dir)
-
-                end_extract = time.time()
-                print(f'batch {batch_no} downloaded in {end_dl - start_dl}s, unzipped in {end_extract - end_dl}s')
-
-        for zipped_csv in os.listdir(dest_dir):
-            if not zipped_csv.endswith('.zip'):
-                continue
-            path = dest_dir + "/" + zipped_csv
-            with zipfile.ZipFile(path) as zf:
-                zf.extractall(dest_dir)
-            os.remove(path)
-
     def batch_download_parallel(self, archive):
+        """For a given archive, request all the files in the archive and download them
+        in parallel, first downloading the zip files to a tmpdir, then unzipping them to
+        the desired destination directory."""
         url = archive.url
         all_files = self.index_request(archive)
         dest_dir = archive.folder
@@ -249,6 +220,8 @@ class ErcotApiClient:
         overall_start = time.time()
 
         def download_and_unzip_batch(batch_no, file_batch, tmpdir):
+            """Download a batch of files in a zip file and unzip them,
+            moving them from the tmpdir to the destination directory."""
             docIds = [str(doc['id']) for doc in file_batch]
             data = {
                 'docIds': docIds,
@@ -265,6 +238,7 @@ class ErcotApiClient:
                         f.write(chunk)
 
             end_dl = time.time()
+            # Unzip the zip-of-zips from the the batch endpoint.
             with zipfile.ZipFile(path) as zf:
                 zf.extractall(dest_dir)
 
@@ -288,7 +262,7 @@ class ErcotApiClient:
                     processed += 1
                     print(f"{processed}/{len(batches)} done")
 
-        # Unzipping any additional files that were zipped in the destination directory
+        # Unzipping the zipped csv files in the dest dir.
         beginning_unzipping = time.time()
         print(f"Downloads complete in {beginning_unzipping - overall_start}s...unzipping downloaded files")
         for zipped_csv in os.listdir(dest_dir):
@@ -302,34 +276,4 @@ class ErcotApiClient:
         done = time.time()
         print(f"Unzipped in {done - beginning_unzipping}s")
         print(f"Downloaded {len(all_files)} in {done - overall_start}s.")
-
-
-def merge_csvs(dir):
-    # Use glob to find all CSV files in the directory and sort them
-    start = time.time()
-    csv_files = sorted(glob.glob(f'{dir}/*.csv'))
-
-    # Create an empty list to store dataframes
-    dfs = []
-
-    # Loop over all CSV files and read them into pandas dataframes
-    for file in csv_files:
-        df = pd.read_csv(file)
-        dfs.append(df)
-
-    t1 = time.time()
-    print(f"Read all csvs in {t1 - start}")
-    # Concatenate all dataframes into one dataframe
-    merged_df = pd.concat(dfs, ignore_index=True)
-    t2 = time.time()
-    print(f"Concatenated in in {t2 - t1}")
-
-    return merged_df
-
-    merged_df.to_csv(dir + '.csv')
-    t3 = time.time()
-    print(f"Wrote to disk in {t3 - t2}")
         
-
-# Example usage
-# client = ErcotApiClient()

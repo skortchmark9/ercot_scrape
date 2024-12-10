@@ -1,7 +1,6 @@
 """
-
-Our goal for each dataset is to have a datetime column that serves as the index.
-
+This module contains functions for transforming ERCOT data from raw CSV files
+into more useful formats, to be used for optimization and comparison.
 """
 from collections import defaultdict
 import time
@@ -276,7 +275,7 @@ def split_by_year(path, df=None):
 
 def load_settlement_points():
     """Settlement Points (SPs) are the buses that have distinct prices
-    (ercot settle prices at these buses), while the other buse prices
+    (ercot settles prices at these buses), while the other bus prices
     are based on the nearest SP.
     
     This mapping allows us to find the list of nodes which are associated
@@ -298,15 +297,15 @@ def load_settlement_points():
 def process_one_realtime_lmp(path):
     df = pd.read_csv(path)
     pivoted = df.pivot_table(index='SCEDTimestamp', columns='SettlementPoint', values='LMP')
-
     pivoted['datetime_local'] = pivoted.index.map(lambda x: pd.to_datetime(x, format='%m/%d/%Y %H:%M:%S'))
 
-    # Reorder columns to put datetime_local at the front
-    # pivoted = pivoted.reset_index(drop=True)
+    # Since we pivoted the columns, there is only one row.
     d = pivoted.to_dict('records')[0]
     return d
 
 def process_one_yr_realtime_lmp(year, input_dir='realtime_lmps', output_dir='realtime_lmps_by_year'):
+    """Process all the realtime LMPs for a given year, where rows are timestamps and columns are busses.
+    Note that there are ~500k files per year so we will process them in parallel."""
     year = int(year)
     t0 = time.time()
     csv_files = glob.glob(f'{input_dir}/*_{year}*.csv')
@@ -323,7 +322,7 @@ def process_one_yr_realtime_lmp(year, input_dir='realtime_lmps', output_dir='rea
         for future in as_completed(futures):
             try:
                 the_dict = future.result()
-                # Can happen due to 2019 as a timestamp, getting picked up by glob
+                # Can happen due to e.g. 2019 as a timestamp, getting picked up by glob
                 if the_dict['datetime_local'].year != year:
                     continue
 
@@ -341,7 +340,8 @@ def process_one_yr_realtime_lmp(year, input_dir='realtime_lmps', output_dir='rea
     print(f"merged, sorted, wrote in {t1 - t0}s")
     return merged
 
-def avg_hourly_prices(df):
+def avg_hourly_prices_for_realtime(df):
+    """For each hour, average the LMPs across all nodes."""
     df['datetime_local'] = pd.to_datetime(df['datetime_local'], format='ISO8601')
     df['hour'] = df['datetime_local'].dt.hour
     df['day'] = df['datetime_local'].dt.day

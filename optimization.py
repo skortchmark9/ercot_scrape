@@ -11,7 +11,8 @@ from transform import load_settlement_points
 
 def load_lmp_data(filepath):
     """
-    Read csv where rows are timestemps, columns are nodes, and values are LMPs
+    Read DAM LMP data from disk. Expects that rows are timestemps,
+    columns are nodes, and values are LMPs
     """
     ercot_data = pd.read_csv(filepath)
 
@@ -32,9 +33,6 @@ def load_lmp_data(filepath):
 def optimize_battery_placement(node_name, node_lmp):
     """
     Solve the optimization problem to maximize profit from battery operations.
-
-    Returns:
-    - Optimal profit and decision variables.
     """
     H = len(node_lmp)
     max_battery_size = 100
@@ -79,9 +77,8 @@ def optimize_battery_placement(node_name, node_lmp):
 
     # Charge/discharge limits
     for t in range(H):
-        # @TODO: Should these account for efficiency? ( added in efficiency factor, for charge / discharge )
-        model.addConstr(charge[t] <= max_charge_rate / efficiency, name=f"ChargeLimit_Time{t}")
-        model.addConstr(discharge[t] <= max_charge_rate * efficiency, name=f"DischargeLimit_Time{t}")
+        model.addConstr(charge[t] <= max_charge_rate, name=f"ChargeLimit_Time{t}")
+        model.addConstr(discharge[t] <= max_charge_rate, name=f"DischargeLimit_Time{t}")
 
     # Optimize
     model.optimize()

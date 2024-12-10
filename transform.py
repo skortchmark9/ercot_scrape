@@ -27,6 +27,8 @@ WEATHER_ZONES = [
 # Set timezone to Central Prevailing Time (ERCOT), which is America/Chicago (CST/CDT)
 texas_tz = pytz.timezone('America/Chicago')
 
+### Shared utilities
+
 def convert_interval_ending_to_datetimes(df):
     """Assuming 5minute intervals"""
     dt_combined = pd.to_datetime(df['INTERVAL_ENDING'], format='%m/%d/%Y %H:%M')
@@ -98,8 +100,25 @@ def parse_date_from_csv_filename(fname):
     parsed_date = pd.to_datetime(combined_str, format='%Y%m%d%H%M%S')
     return parsed_date
 
+def split_by_year(path, df=None):
+    filename = path.split('/')[-1]
 
-## WEATHER
+    if df is None:
+        t0 = time.time()
+        df = pd.read_csv(filename)
+        t1 = time.time()
+        print(f"Read df in {t1-t0}s")
+
+    if 'datetime_local' not in df.keys():
+        df = convert_to_datetimes(df)
+
+    split_by_year = {year: group for year, group in df.groupby(df['datetime_local'].dt.year)}
+
+    for year, subset in split_by_year.items():
+        new_filename = filename.replace('.csv', f'-{year}.csv')
+        subset.to_csv(path.replace(filename, new_filename), index=False)
+
+### Weather
 
 def process_one_weather_csv(path):
     df = pd.read_csv(path)
@@ -174,14 +193,11 @@ def process_all_weather_csvs(input_dir, output_dir='weather_by_zone'):
     print(f"Wrote to disk in {t3 - t2}")
 
 
-## DAM LMP
+## DAM LMP ##
 
 def process_one_dam_lmp(path):
-    """
-    DAM LMP:
-        Could you pivot the CSV file to have rows as datetime, columns as the bus, and cell values as the LMP? This would make the dataframe easier to read. And if yo could make it yearly CSVs so the file size can be manageable. (Attached is a sketch of the desired dataframe)
-        Same as LDF, merge DeliveryDate and HourEnding to have datetime column.
-        DSTFlag is for Daylight Saving Time repeated values.
+    """A given file contains a 24 hours of predictions for each bus. The files are
+    generated around noon each day, and contain predictions for the next day.
     """
     df = pd.read_csv(path)
 
@@ -195,6 +211,8 @@ def process_one_dam_lmp(path):
     return reshaped_df
 
 def process_all_dam_lmps(input_dir, output_dir='dam_lmps'):
+    """Process all the DAM LMPS in the folder and output a new csv split
+    by year."""
     t0 = time.time()
     csv_files = sorted(glob.glob(f'{input_dir}/*.csv'))
 
@@ -220,8 +238,11 @@ def process_all_dam_lmps(input_dir, output_dir='dam_lmps'):
     t3 = time.time()
     print(f"Wrote to disk in {t3 - t2}")
 
-## Works for wind and solar since they are giving prices over last hour
-def process_all_historical(input_dir, output_dir='solar'):
+### Wind & Solar
+
+def process_wind_and_solar(input_dir, output_dir='solar'):
+    """Wind and solar files give prices for the last hour, so we take
+    the last row."""
     t0 = time.time()
     csv_files = sorted(glob.glob(f'{input_dir}/*.csv'))
 
@@ -251,27 +272,7 @@ def process_all_historical(input_dir, output_dir='solar'):
     t3 = time.time()
     print(f"Wrote to disk in {t3 - t2}")
 
-
-def split_by_year(path, df=None):
-    filename = path.split('/')[-1]
-
-    if df is None:
-        t0 = time.time()
-        df = pd.read_csv(filename)
-        t1 = time.time()
-        print(f"Read df in {t1-t0}s")
-
-    if 'datetime_local' not in df.keys():
-        df = convert_to_datetimes(df)
-
-    split_by_year = {year: group for year, group in df.groupby(df['datetime_local'].dt.year)}
-
-    # Verify the result
-    for year, subset in split_by_year.items():
-        new_filename = filename.replace('.csv', f'-{year}.csv')
-        subset.to_csv(path.replace(filename, new_filename), index=False)
-
-
+### Settlement Points
 
 def load_settlement_points():
     """Settlement Points (SPs) are the buses that have distinct prices

@@ -105,6 +105,7 @@ def compare_dam_with_actual_profits(year):
     results = load_results(year)
 
     nodes = set(results.keys()).intersection(set(actual.keys()))
+    print(f"{len(nodes)} overlapping in year {year}")
 
     expected_net_profits_per_node = {}
     actual_net_profits_per_node = {}
@@ -139,7 +140,7 @@ def compare_dam_with_actual_profits(year):
     print(f"\tMean optimal profit across all nodes: {np.mean(expected_net_profits):,.2f}")
     print(f"\tMean actual profit all nodes: {np.mean(actual_net_profits):,.2f}")
 
-    diff = abs(np.mean((actual_net_profits - expected_net_profits) / expected_net_profits) * 100)
+    diff = abs(np.mean((actual_net_profits) / expected_net_profits) * 100)
     print(f"\tMean difference of prices per-node {diff:.2f}%")
 
     np.argmin(expected_net_profits_per_node)
